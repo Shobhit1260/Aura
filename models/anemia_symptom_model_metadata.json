@@ -1,0 +1,13 @@
+{
+  "features": [
+    "fatigue",
+    "pale_skin",
+    "dizziness",
+    "shortness_of_breath",
+    "headache",
+    "cold_hands_feet"
+  ],
+  "target": "anemia",
+  "val_auc": 1.0,
+  "n_samples": 6
+}
