@@ -12,6 +12,6 @@
   ],
   "threshold": 0.5,
   "quantization": "dynamic",
-  "train_samples_estimate": 3824,
-  "val_samples_estimate": 960
+  "train_samples_estimate": 5776,
+  "val_samples_estimate": 1456
 }

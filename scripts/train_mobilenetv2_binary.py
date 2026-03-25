@@ -17,8 +17,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name", type=str, default="model", help="Artifact prefix")
     parser.add_argument("--img-size", type=int, default=224, help="Input image size")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
-    parser.add_argument("--epochs-head", type=int, default=5, help="Feature extraction epochs")
-    parser.add_argument("--epochs-finetune", type=int, default=5, help="Fine-tune epochs")
+
+    # ✅ increased defaults
+    parser.add_argument("--epochs-head", type=int, default=10, help="Feature extraction epochs")
+    parser.add_argument("--epochs-finetune", type=int, default=15, help="Fine-tune epochs")
+
     parser.add_argument("--validation-split", type=float, default=0.2, help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
@@ -33,26 +36,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use class weights to reduce imbalance bias",
     )
+
+    # ✅ increased unfreeze depth
     parser.add_argument(
         "--finetune-unfreeze-layers",
         type=int,
-        default=30,
+        default=80,
         help="How many trailing base layers to unfreeze during fine-tuning",
     )
     return parser.parse_args()
 
 
-def build_datasets(args: argparse.Namespace) -> tuple[tf.data.Dataset, tf.data.Dataset, list[str], int, int]:
+def build_datasets(args: argparse.Namespace):
     data_dir = Path(args.data_dir)
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
     expected_classes = ["normal", "tb"]
-    missing = [name for name in expected_classes if not (data_dir / name).exists()]
-    if missing:
-        raise FileNotFoundError(
-            f"Missing class folder(s): {missing}. Expected dataset structure with 'normal/' and 'tb/'."
-        )
 
     train_ds = tf.keras.utils.image_dataset_from_directory(
         data_dir,
@@ -91,22 +89,21 @@ def build_datasets(args: argparse.Namespace) -> tuple[tf.data.Dataset, tf.data.D
     return train_ds, val_ds, class_names, train_count, val_count
 
 
-def compute_class_weights(train_ds: tf.data.Dataset) -> dict[int, float]:
+def compute_class_weights(train_ds: tf.data.Dataset):
     labels = []
     for _, y in train_ds.unbatch():
         labels.append(int(y.numpy()[0]))
 
-    labels_np = np.array(labels)
-    counts = np.bincount(labels_np, minlength=2)
+    counts = np.bincount(labels, minlength=2)
     total = counts.sum()
-    weights = {
+
+    return {
         0: float(total / (2.0 * max(counts[0], 1))),
         1: float(total / (2.0 * max(counts[1], 1))),
     }
-    return weights
 
 
-def build_model(img_size: int) -> tuple[tf.keras.Model, tf.keras.Model]:
+def build_model(img_size: int):
     inputs = tf.keras.Input(shape=(img_size, img_size, 3), name="image")
 
     augmentation = tf.keras.Sequential(
@@ -115,12 +112,11 @@ def build_model(img_size: int) -> tuple[tf.keras.Model, tf.keras.Model]:
             tf.keras.layers.RandomRotation(0.05),
             tf.keras.layers.RandomZoom(0.1),
             tf.keras.layers.RandomContrast(0.1),
-        ],
-        name="augmentation",
+        ]
     )
 
     x = augmentation(inputs)
-    x = tf.keras.layers.Rescaling(1.0 / 255.0, name="rescale_0_1")(x)
+    x = tf.keras.layers.Rescaling(1.0 / 255.0)(x)
 
     base_model = tf.keras.applications.MobileNetV2(
         input_shape=(img_size, img_size, 3),
@@ -131,32 +127,31 @@ def build_model(img_size: int) -> tuple[tf.keras.Model, tf.keras.Model]:
 
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dropout(0.25)(x)
-    outputs = tf.keras.layers.Dense(1, activation="sigmoid", name="risk_score")(x)
 
-    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="mobilenetv2_binary")
+    # ✅ increased dropout
+    x = tf.keras.layers.Dropout(0.4)(x)
+
+    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model, base_model
 
 
-def set_finetune_layers(base_model: tf.keras.Model, unfreeze_layers: int) -> None:
+def set_finetune_layers(base_model: tf.keras.Model, unfreeze_layers: int):
     base_model.trainable = True
 
     split_idx = max(len(base_model.layers) - unfreeze_layers, 0)
+
     for i, layer in enumerate(base_model.layers):
         if i < split_idx or isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
 
 
-def compile_model(model: tf.keras.Model, learning_rate: float) -> None:
+def compile_model(model: tf.keras.Model, lr: float) -> None:
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss=tf.keras.losses.BinaryCrossentropy(),
-        metrics=[
-            tf.keras.metrics.BinaryAccuracy(name="accuracy"),
-            tf.keras.metrics.AUC(name="auc"),
-            tf.keras.metrics.Precision(name="precision"),
-            tf.keras.metrics.Recall(name="recall"),
-        ],
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        loss="binary_crossentropy",
+        metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
     )
 
 
@@ -173,48 +168,43 @@ def export_tflite(model: tf.keras.Model, output_path: Path, quantization: str) -
     output_path.write_bytes(tflite_model)
 
 
-def main() -> None:
+def main():
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tf.keras.utils.set_random_seed(args.seed)
-
     train_ds, val_ds, class_names, train_count, val_count = build_datasets(args)
 
     model, base_model = build_model(args.img_size)
-    compile_model(model, learning_rate=1e-3)
+    compile_model(model, 1e-3)
 
+    # ✅ added checkpoint
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor="val_auc", mode="max", patience=4, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=2, min_lr=1e-6),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=2),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=str(output_dir / "best_model.keras"),
+            monitor="val_auc",
+            mode="max",
+            save_best_only=True
+        ),
     ]
 
     class_weights = compute_class_weights(train_ds) if args.use_class_weights else None
 
-    print("\n[Stage 1/2] Training classification head...")
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=args.epochs_head,
-        class_weight=class_weights,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    print("\n[Stage 1/2] Training head...")
+    model.fit(train_ds, validation_data=val_ds, epochs=args.epochs_head,
+              class_weight=class_weights, callbacks=callbacks)
 
-    print("\n[Stage 2/2] Fine-tuning top MobileNetV2 layers...")
+    print("\n[Stage 2/2] Fine-tuning...")
     set_finetune_layers(base_model, args.finetune_unfreeze_layers)
-    compile_model(model, learning_rate=1e-5)
+    compile_model(model, 1e-5)
 
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=args.epochs_head + args.epochs_finetune,
-        initial_epoch=args.epochs_head,
-        class_weight=class_weights,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    model.fit(train_ds, validation_data=val_ds,
+              epochs=args.epochs_head + args.epochs_finetune,
+              initial_epoch=args.epochs_head,
+              class_weight=class_weights,
+              callbacks=callbacks)
 
     keras_path = output_dir / f"{args.model_name}.keras"
     tflite_path = output_dir / f"{args.model_name}.tflite"

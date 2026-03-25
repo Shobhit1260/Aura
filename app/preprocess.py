@@ -15,17 +15,13 @@ def decode_image(file_bytes: bytes) -> np.ndarray:
 def preprocess_image(image_bgr: np.ndarray, input_size: int, task: str) -> np.ndarray:
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
+    # ✅ FIX: Removed CLAHE (to match training)
     if task == "tb":
-        # CLAHE often helps improve local contrast for chest X-ray inputs.
-        image_gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        image_gray = clahe.apply(image_gray)
-        image_rgb = cv2.cvtColor(image_gray, cv2.COLOR_GRAY2RGB)
+        image_rgb = image_rgb  # keep as-is
 
     resized = cv2.resize(image_rgb, (input_size, input_size), interpolation=cv2.INTER_AREA)
 
-    # TB model already has an in-graph Rescaling(1/255) layer, so keep
-    # inference input in 0..255 float space to avoid double normalization.
+    # TB model already has Rescaling(1/255) inside model
     if task == "tb":
         prepared = resized.astype(np.float32)
     else:
@@ -44,27 +40,30 @@ def validate_tb_xray_image(image_bgr: np.ndarray, min_side: int = 224) -> tuple[
     if height < min_side or width < min_side:
         return False, f"Image resolution too small for TB screening (min {min_side}x{min_side})."
 
-    # Chest X-rays are expected to be near-monochrome.
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     sat_mean = float(hsv[:, :, 1].mean())
-    if sat_mean > 40.0:
+
+    # ⚠️ OPTIONAL: slightly relaxed threshold (better real-world usability)
+    if sat_mean > 60.0:
         return False, "Image appears too colorful to be a chest X-ray."
 
-    # RGB channels should be very similar for grayscale radiographs.
     b = image_bgr[:, :, 0].astype(np.float32)
     g = image_bgr[:, :, 1].astype(np.float32)
     r = image_bgr[:, :, 2].astype(np.float32)
     channel_delta = (np.abs(b - g) + np.abs(g - r) + np.abs(b - r)) / 3.0
-    if float(channel_delta.mean()) > 12.0:
+
+    if float(channel_delta.mean()) > 15.0:
         return False, "Image channels are inconsistent with grayscale X-ray data."
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     contrast_std = float(gray.std())
-    if contrast_std < 20.0:
+
+    if contrast_std < 15.0:
         return False, "Image contrast is too low for a usable chest X-ray."
 
     brightness = float(gray.mean())
-    if brightness < 20.0 or brightness > 235.0:
+
+    if brightness < 15.0 or brightness > 240.0:
         return False, "Image brightness is out of expected chest X-ray range."
 
     return True, "ok"
