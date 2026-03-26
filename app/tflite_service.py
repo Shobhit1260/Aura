@@ -38,7 +38,7 @@ class TFLiteModelService:
     def is_loaded(self) -> bool:
         return self.interpreter is not None
 
-    def predict(self, model_input: np.ndarray) -> float:
+    def predict_probabilities(self, model_input: np.ndarray) -> np.ndarray:
         if not self.is_loaded:
             raise RuntimeError("Model is not loaded")
 
@@ -52,21 +52,31 @@ class TFLiteModelService:
 
         flat = np.ravel(output).astype(np.float32)
 
-        if flat.size == 1:
-            score = float(flat[0])
-        elif flat.size >= 2:
-            # For 2-class outputs use class-1 probability when available.
-            if np.all(flat >= 0.0) and np.all(flat <= 1.0) and abs(float(flat.sum()) - 1.0) < 1e-3:
-                score = float(flat[1])
-            else:
-                shifted = flat - np.max(flat)
-                exp_vals = np.exp(shifted)
-                probs = exp_vals / np.sum(exp_vals)
-                score = float(probs[1])
-        else:
+        if flat.size == 0:
             raise RuntimeError("Unexpected empty model output")
 
-        if score < 0.0 or score > 1.0:
-            score = float(1.0 / (1.0 + np.exp(-score)))
+        if flat.size == 1:
+            score = float(flat[0])
+            if score < 0.0 or score > 1.0:
+                score = float(1.0 / (1.0 + np.exp(-score)))
+            score = float(np.clip(score, 0.0, 1.0))
+            return np.array([1.0 - score, score], dtype=np.float32)
 
-        return float(np.clip(score, 0.0, 1.0))
+        if np.all(flat >= 0.0) and np.all(flat <= 1.0) and abs(float(flat.sum()) - 1.0) < 1e-3:
+            probs = flat
+        else:
+            shifted = flat - np.max(flat)
+            exp_vals = np.exp(shifted)
+            probs = exp_vals / np.sum(exp_vals)
+
+        probs = np.clip(probs, 0.0, 1.0)
+        denom = float(np.sum(probs))
+        if denom <= 0.0:
+            raise RuntimeError("Model returned invalid probabilities")
+        return (probs / denom).astype(np.float32)
+
+    def predict(self, model_input: np.ndarray) -> float:
+        probs = self.predict_probabilities(model_input)
+        if probs.size < 2:
+            return float(probs[-1])
+        return float(probs[1])

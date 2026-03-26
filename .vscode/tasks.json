@@ -1,0 +1,31 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Train TB model EfficientNet",
+			"type": "shell",
+			"command": "C:/Users/sriva/AppData/Local/Programs/Python/Python311/python.exe",
+			"args": [
+				"scripts/train_mobilenetv2_binary.py",
+				"--data-dir",
+				"dataset_tb",
+				"--output-dir",
+				"models",
+				"--model-name",
+				"tb_model",
+				"--img-size",
+				"224",
+				"--epochs-head",
+				"2",
+				"--epochs-finetune",
+				"2",
+				"--finetune-unfreeze-layers",
+				"80",
+				"--quantization",
+				"dynamic",
+				"--use-class-weights"
+			],
+			"isBackground": false
+		}
+	]
+}

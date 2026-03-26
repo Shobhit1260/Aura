@@ -1,9 +1,9 @@
-# TB + Anemia Screening Backend
+# TB + Eye Disease Screening Backend
 
-This backend is now split into two models:
+This backend serves two image models:
 
-- Model 1 (TB): MobileNetV2 image classifier on chest X-rays (TFLite)
-- Model 2 (Anemia): Symptom-based logistic regression model (joblib)
+- Model 1 (TB): EfficientNetB0 binary classifier on chest X-rays (TFLite)
+- Model 2 (Eye disease): EfficientNetB0 multiclass classifier on fundus/eye images (TFLite)
 
 ## Medical Disclaimer
 
@@ -20,33 +20,30 @@ Returns service status and model load status.
 
 TB image inference endpoint.
 
+This endpoint validates uploads with a local pre-classification pipeline before TB inference:
+
+- First, hard rule checks reject clearly invalid images (too small, too colorful, too blurry)
+- Then, an X-ray validator model classifies valid chest X-ray vs invalid image
+- If invalid, returns Invalid photo (HTTP 400)
+- If valid, runs TB classification model
+
 - Content type: multipart/form-data
 - Field: file
 
-### POST /predict/anemia
+### POST /predict/eye-disease
 
-Anemia symptom-model endpoint.
+Eye-disease image inference endpoint.
 
-- Content type: application/json
-- Body example:
-
-```json
-{
-  "fatigue": 1,
-  "pale_skin": 1,
-  "dizziness": 0,
-  "shortness_of_breath": 1,
-  "headache": 0,
-  "cold_hands_feet": 1
-}
-```
+- Content type: multipart/form-data
+- Field: file
+- Returns top predicted class as risk and full class probability distribution
 
 ## Configuration (.env)
 
 Copy .env.example to .env and update values.
 
 ```env
-APP_NAME=TB and Anemia Screening API
+APP_NAME=TB and Eye Disease Screening API
 APP_ENV=development
 APP_HOST=0.0.0.0
 APP_PORT=8000
@@ -57,12 +54,20 @@ TB_INPUT_SIZE=224
 TB_THRESHOLD=0.5
 TB_LABEL_POSITIVE=TB High Risk
 TB_LABEL_NEGATIVE=TB Low Risk
+TB_STRICT_XRAY_VALIDATION=true
+TB_XRAY_MIN_SIDE=224
+TB_XRAY_GATE_ENABLED=true
+TB_XRAY_GATE_REQUIRED=false
+TB_XRAY_GATE_MODEL_PATH=models/tb_xray_gate_model.tflite
+TB_XRAY_GATE_INPUT_SIZE=224
+TB_XRAY_GATE_THRESHOLD=0.5
+TB_XRAY_GATE_POSITIVE_CLASS_INDEX=1
 
-ANEMIA_SYMPTOM_MODEL_PATH=models/anemia_symptom_model.joblib
-ANEMIA_SYMPTOM_FEATURES=fatigue,pale_skin,dizziness,shortness_of_breath,headache,cold_hands_feet
-ANEMIA_THRESHOLD=0.5
-ANEMIA_LABEL_POSITIVE=Anemia High Risk
-ANEMIA_LABEL_NEGATIVE=Anemia Low Risk
+EYE_MODEL_PATH=models/eye_disease_model.tflite
+EYE_INPUT_SIZE=224
+EYE_MIN_CONFIDENCE=0.4
+EYE_LABEL_FALLBACK=Needs Ophthalmologist Review
+EYE_DEFAULT_CLASS_NAMES=cataract,diabetic_retinopathy,glaucoma,normal
 
 DEFAULT_FALLBACK_LABEL=Needs Clinical Review
 ENABLE_SIMPLE_HEURISTICS=true
@@ -77,18 +82,18 @@ CORS_ALLOW_METHODS=GET,POST,OPTIONS
 CORS_ALLOW_HEADERS=*
 ```
 
-## Train Model 1 (TB MobileNetV2)
+## Train TB Model
 
-Use script:
+Script:
 
 - scripts/train_mobilenetv2_binary.py
 
-Expected TB dataset layout:
+Expected dataset:
 
 ```text
 dataset_tb/
-├─ normal/
-└─ tb/
+  normal/
+  tb/
 ```
 
 Train command:
@@ -99,49 +104,72 @@ python scripts/train_mobilenetv2_binary.py \
   --output-dir models \
   --model-name tb_model \
   --img-size 224 \
-  --epochs-head 5 \
-  --epochs-finetune 5 \
+  --epochs-head 8 \
+  --epochs-finetune 10 \
+  --finetune-unfreeze-layers 80 \
   --quantization dynamic \
   --use-class-weights
 ```
 
-Output used by API:
+## Train TB X-ray Gate Model
 
-- models/tb_model.tflite
+Script:
 
-## Train Model 2 (Anemia Symptom Model)
+- scripts/train_tb_xray_gate_model.py
 
-Use script:
+Expected dataset:
 
-- scripts/train_anemia_symptom_model.py
-
-CSV template is provided:
-
-- data/anemia_symptoms_template.csv
-
-Required columns:
-
-- fatigue
-- pale_skin
-- dizziness
-- shortness_of_breath
-- headache
-- cold_hands_feet
-- anemia (target 0/1)
+```text
+dataset_tb_gate/
+  not_chest_xray/
+  chest_xray/
+```
 
 Train command:
 
 ```bash
-python scripts/train_anemia_symptom_model.py \
-  --csv data/anemia_symptoms_template.csv \
-  --output models/anemia_symptom_model.joblib \
-  --features fatigue,pale_skin,dizziness,shortness_of_breath,headache,cold_hands_feet \
-  --target anemia
+python scripts/train_tb_xray_gate_model.py \
+  --data-dir dataset_tb_gate \
+  --output-dir models \
+  --model-name tb_xray_gate_model \
+  --img-size 224 \
+  --epochs-head 5 \
+  --epochs-finetune 5 \
+  --quantization dynamic
 ```
 
-Output used by API:
+## Train Eye Disease Model
 
-- models/anemia_symptom_model.joblib
+Script:
+
+- scripts/train_eye_disease_classifier.py
+
+Expected dataset:
+
+```text
+dataset_eye/
+  class_1/
+  class_2/
+  class_3/
+  ...
+```
+
+Use your real disease folder names as class folders.
+
+Train command:
+
+```bash
+python scripts/train_eye_disease_classifier.py \
+  --data-dir dataset_eye \
+  --output-dir models \
+  --model-name eye_disease_model \
+  --img-size 224 \
+  --epochs-head 6 \
+  --epochs-finetune 6 \
+  --finetune-unfreeze-layers 80 \
+  --quantization dynamic \
+  --use-class-weights
+```
 
 ## Run Backend
 
@@ -150,7 +178,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Docs:
+Swagger docs:
 
 - http://localhost:8000/docs
 
@@ -164,11 +192,10 @@ curl -X POST "http://localhost:8000/predict/tb" \
   -F "file=@sample_tb_xray.jpg"
 ```
 
-Anemia symptoms:
+Eye disease:
 
 ```bash
-curl -X POST "http://localhost:8000/predict/anemia" \
-  -H "Content-Type: application/json" \
+curl -X POST "http://localhost:8000/predict/eye-disease" \
   -H "X-API-Key: change-me" \
-  -d "{\"fatigue\":1,\"pale_skin\":1,\"dizziness\":0,\"shortness_of_breath\":1,\"headache\":0,\"cold_hands_feet\":1}"
+  -F "file=@sample_eye_image.jpg"
 ```

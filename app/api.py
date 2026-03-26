@@ -4,14 +4,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 
-from app.anemia_symptom_service import AnemiaSymptomModelService
+from app.eye_disease_service import EyeDiseaseModelService
 from app.preprocess import (
     decode_image,
     preprocess_image,
-    simple_brightness_heuristic,
     validate_tb_xray_image,
 )
-from app.schemas import AnemiaSymptomsRequest, HealthResponse, PredictionResponse
+from app.schemas import HealthResponse, PredictionResponse
 from app.settings import Settings
 from app.tflite_service import TFLiteModelService
 
@@ -19,7 +18,8 @@ from app.tflite_service import TFLiteModelService
 def build_router(
     settings: Settings,
     tb_service: TFLiteModelService,
-    anemia_service: AnemiaSymptomModelService,
+    tb_xray_gate_service: TFLiteModelService,
+    eye_disease_service: EyeDiseaseModelService,
 ) -> APIRouter:
     router = APIRouter()
     verify_api_key = _build_api_key_dependency(settings)
@@ -30,7 +30,8 @@ def build_router(
             status="ok",
             app=settings.app_name,
             tb_model_loaded=tb_service.is_loaded,
-            anemia_model_loaded=anemia_service.is_loaded,
+            tb_xray_gate_model_loaded=tb_xray_gate_service.is_loaded,
+            eye_disease_model_loaded=eye_disease_service.is_loaded,
         )
 
     @router.post("/predict/tb", response_model=PredictionResponse, tags=["prediction"])
@@ -47,24 +48,30 @@ def build_router(
             positive_label=settings.tb_label_positive,
             negative_label=settings.tb_label_negative,
             fallback_label=settings.default_fallback_label,
-            use_heuristics=settings.enable_simple_heuristics,
             positive_class_index=settings.tb_positive_class_index,
             strict_xray_validation=settings.tb_strict_xray_validation,
+            xray_min_side=settings.tb_xray_min_side,
+            xray_gate_service=tb_xray_gate_service,
+            xray_gate_enabled=settings.tb_xray_gate_enabled,
+            xray_gate_required=settings.tb_xray_gate_required,
+            xray_gate_input_size=settings.tb_xray_gate_input_size,
+            xray_gate_threshold=settings.tb_xray_gate_threshold,
+            xray_gate_positive_class_index=settings.tb_xray_gate_positive_class_index,
         )
 
-    @router.post("/predict/anemia", response_model=PredictionResponse, tags=["prediction"])
-    async def predict_anemia(
-        payload: AnemiaSymptomsRequest,
+    @router.post("/predict/eye-disease", response_model=PredictionResponse, tags=["prediction"])
+    async def predict_eye_disease(
+        file: UploadFile = File(...),
         _: None = Depends(verify_api_key),
     ) -> PredictionResponse:
-        return _predict_anemia_from_symptoms(
-            task="anemia",
-            symptoms=payload.model_dump(),
-            model_service=anemia_service,
-            threshold=settings.anemia_threshold,
-            positive_label=settings.anemia_label_positive,
-            negative_label=settings.anemia_label_negative,
-            fallback_label=settings.default_fallback_label,
+        return await _predict_eye_disease(
+            task="eye_disease",
+            file=file,
+            model_service=eye_disease_service,
+            input_size=settings.eye_input_size,
+            min_confidence=settings.eye_min_confidence,
+            fallback_label=settings.eye_label_fallback,
+            default_fallback_label=settings.default_fallback_label,
         )
 
     return router
@@ -92,9 +99,15 @@ async def _predict(
     positive_label: str,
     negative_label: str,
     fallback_label: str,
-    use_heuristics: bool,
     positive_class_index: int,
     strict_xray_validation: bool,
+    xray_min_side: int,
+    xray_gate_service: TFLiteModelService | None,
+    xray_gate_enabled: bool,
+    xray_gate_required: bool,
+    xray_gate_input_size: int,
+    xray_gate_threshold: float,
+    xray_gate_positive_class_index: int,
 ) -> PredictionResponse:
     if task == "tb":
         content_type = file.content_type or ""
@@ -111,9 +124,37 @@ async def _predict(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if task == "tb" and strict_xray_validation:
-        is_valid_xray, reason = validate_tb_xray_image(image, min_side=input_size)
+        is_valid_xray, reason = validate_tb_xray_image(image, min_side=xray_min_side)
         if not is_valid_xray:
-            raise HTTPException(status_code=400, detail=f"Invalid TB input: {reason}")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid photo (hard checks): please upload a clear chest X-ray image. "
+                    f"Reason: {reason}"
+                ),
+            )
+
+    if task == "tb" and xray_gate_enabled:
+        if xray_gate_service is None or not xray_gate_service.is_loaded:
+            if xray_gate_required:
+                raise HTTPException(
+                    status_code=503,
+                    detail="X-ray gate model is required but not loaded.",
+                )
+        else:
+            gate_input = preprocess_image(image, input_size=xray_gate_input_size, task="tb")
+            gate_score = xray_gate_service.predict(gate_input)
+            if xray_gate_positive_class_index == 0:
+                gate_score = 1.0 - gate_score
+
+            if gate_score < xray_gate_threshold:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid photo (classifier): not a valid chest X-ray. "
+                        f"Score={gate_score:.3f}, required>={xray_gate_threshold:.3f}."
+                    ),
+                )
 
     note = (
         "AI-assisted screening only. Not a diagnosis. "
@@ -122,12 +163,6 @@ async def _predict(
 
     if not model_service.is_loaded:
         confidence = 0.5
-        if use_heuristics:
-            brightness = simple_brightness_heuristic(image)
-            if task == "anemia" and brightness < 0.25:
-                confidence = 0.75
-            elif task == "anemia" and brightness > 0.8:
-                confidence = 0.25
 
         risk = positive_label if confidence >= threshold else fallback_label
         return PredictionResponse(
@@ -156,31 +191,55 @@ async def _predict(
     )
 
 
-def _predict_anemia_from_symptoms(
+async def _predict_eye_disease(
     task: str,
-    symptoms: dict[str, int],
-    model_service: AnemiaSymptomModelService,
-    threshold: float,
-    positive_label: str,
-    negative_label: str,
+    file: UploadFile,
+    model_service: EyeDiseaseModelService,
+    input_size: int,
+    min_confidence: float,
     fallback_label: str,
+    default_fallback_label: str,
 ) -> PredictionResponse:
+    content_type = file.content_type or ""
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Eye-disease endpoint accepts image files only.")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        image = decode_image(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     note = (
         "AI-assisted screening only. Not a diagnosis. "
         "Confirm with clinical tests and professional evaluation."
     )
 
-    score = model_service.predict(symptoms)
-    if not model_service.is_loaded and abs(score - threshold) < 0.05:
-        risk = fallback_label
-    else:
-        risk = positive_label if score >= threshold else negative_label
+    if not model_service.is_loaded:
+        return PredictionResponse(
+            task=task,
+            risk=default_fallback_label,
+            confidence=0.0,
+            threshold=min_confidence,
+            model_loaded=False,
+            note=note,
+            probabilities=None,
+        )
+
+    model_input = preprocess_image(image, input_size=input_size, task=task)
+    top_label, top_score, class_probs = model_service.predict(model_input)
+
+    risk = top_label if top_score >= min_confidence else fallback_label
 
     return PredictionResponse(
         task=task,
         risk=risk,
-        confidence=score,
-        threshold=threshold,
-        model_loaded=model_service.is_loaded,
+        confidence=top_score,
+        threshold=min_confidence,
+        model_loaded=True,
         note=note,
+        probabilities=class_probs,
     )

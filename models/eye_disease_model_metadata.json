@@ -1,0 +1,18 @@
+{
+  "model_name": "eye_disease_model",
+  "input_shape": [
+    224,
+    224,
+    3
+  ],
+  "normalization": "in_graph_rescaling_1_over_255",
+  "class_names": [
+    "cataract",
+    "diabetic_retinopathy",
+    "glaucoma",
+    "normal"
+  ],
+  "quantization": "dynamic",
+  "train_samples_estimate": 3376,
+  "val_samples_estimate": 848
+}

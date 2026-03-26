@@ -10,7 +10,7 @@ import tensorflow as tf
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train MobileNetV2 binary classifier and export Keras + TFLite artifacts."
+        description="Train EfficientNetB0 binary classifier and export Keras + TFLite artifacts."
     )
     parser.add_argument("--data-dir", type=str, required=True, help="Dataset root with class subfolders")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory for model artifacts")
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--finetune-unfreeze-layers",
         type=int,
-        default=30,
+        default=80,
         help="How many trailing base layers to unfreeze during fine-tuning",
     )
     return parser.parse_args()
@@ -120,9 +120,7 @@ def build_model(img_size: int) -> tuple[tf.keras.Model, tf.keras.Model]:
     )
 
     x = augmentation(inputs)
-    x = tf.keras.layers.Rescaling(1.0 / 255.0, name="rescale_0_1")(x)
-
-    base_model = tf.keras.applications.MobileNetV2(
+    base_model = tf.keras.applications.EfficientNetB0(
         input_shape=(img_size, img_size, 3),
         include_top=False,
         weights="imagenet",
@@ -134,7 +132,7 @@ def build_model(img_size: int) -> tuple[tf.keras.Model, tf.keras.Model]:
     x = tf.keras.layers.Dropout(0.25)(x)
     outputs = tf.keras.layers.Dense(1, activation="sigmoid", name="risk_score")(x)
 
-    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="mobilenetv2_binary")
+    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="efficientnetb0_binary")
     return model, base_model
 
 
@@ -202,7 +200,7 @@ def main() -> None:
         verbose=1,
     )
 
-    print("\n[Stage 2/2] Fine-tuning top MobileNetV2 layers...")
+    print("\n[Stage 2/2] Fine-tuning top EfficientNetB0 layers...")
     set_finetune_layers(base_model, args.finetune_unfreeze_layers)
     compile_model(model, learning_rate=1e-5)
 
