@@ -1,0 +1,34 @@
+name: Deploy FastAPI to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy on EC2 over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.EC2_PORT || '22' }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.EC2_APP_DIR || '/opt/aura' }}"
+            BRANCH="${{ github.ref_name }}"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              echo "Repository not found in $APP_DIR"
+              echo "Run setup once on EC2: bash deploy/ec2/setup-ubuntu.sh /opt/aura <repo-url> main"
+              exit 1
+            fi
+            bash "$APP_DIR/deploy/ec2/deploy-ec2.sh" "$APP_DIR" "$BRANCH"
